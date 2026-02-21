@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Film Grain API - 胶片颗粒效果</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .container { max-width: 600px; margin: 0 auto; }
+        h1 { font-size: 2em; margin-bottom: 10px; }
+        .subtitle { color: #888; margin-bottom: 30px; }
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .card h2 { font-size: 1.2em; margin-bottom: 15px; color: #fff; }
+        code {
+            background: rgba(0,0,0,0.3);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background: rgba(0,0,0,0.4);
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.85em;
+            line-height: 1.5;
+        }
+        .param { margin: 10px 0; }
+        .param-name { color: #7dd3fc; }
+        .param-type { color: #fda4af; font-size: 0.85em; }
+        .endpoint {
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-family: monospace;
+            margin: 15px 0;
+        }
+        .demo-area { margin-top: 30px; }
+        input[type="file"] { display: none; }
+        .upload-btn {
+            background: #3b82f6;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: inline-block;
+            transition: 0.2s;
+        }
+        .upload-btn:hover { background: #2563eb; }
+        select, button {
+            padding: 10px 16px;
+            border-radius: 6px;
+            border: none;
+            margin: 5px;
+            font-size: 1em;
+        }
+        select { background: rgba(255,255,255,0.1); color: #fff; }
+        button { background: #10b981; color: white; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #preview { max-width: 100%; margin-top: 20px; border-radius: 8px; }
+        #status { margin-top: 15px; color: #888; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎞️ Film Grain API</h1>
+        <p class="subtitle">为图像添加胶片风格颗粒效果</p>
+
+        <div class="card">
+            <h2>API 端点</h2>
+            <div class="endpoint">POST /api/grain</div>
+
+            <h3 style="margin: 20px 0 10px; font-size: 1em;">请求参数 (JSON)</h3>
+            <div class="param">
+                <span class="param-name">image</span>
+                <span class="param-type">string, required</span>
+                <div style="color:#aaa; font-size:0.9em">Base64 编码的图像</div>
+            </div>
+            <div class="param">
+                <span class="param-name">iso</span>
+                <span class="param-type">number, optional</span>
+                <div style="color:#aaa; font-size:0.9em">ISO 感光度: 50, 100, 200, 400, 800, 1600, 3200</div>
+            </div>
+            <div class="param">
+                <span class="param-name">mode</span>
+                <span class="param-type">string, optional</span>
+                <div style="color:#aaa; font-size:0.9em">"color" (彩色) 或 "bw" (黑白)</div>
+            </div>
+            <div class="param">
+                <span class="param-name">intensity</span>
+                <span class="param-type">number, optional</span>
+                <div style="color:#aaa; font-size:0.9em">手动强度 0.01-0.5，覆盖 ISO 预设</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>在线测试</h2>
+            <div>
+                <label class="upload-btn">
+                    📷 选择图片
+                    <input type="file" id="imageInput" accept="image/*">
+                </label>
+                <select id="isoSelect">
+                    <option value="100">ISO 100 (细腻)</option>
+                    <option value="400" selected>ISO 400 (标准)</option>
+                    <option value="800">ISO 800 (明显)</option>
+                    <option value="1600">ISO 1600 (粗颗粒)</option>
+                </select>
+                <select id="modeSelect">
+                    <option value="color">🎨 彩色</option>
+                    <option value="bw">⬛ 黑白</option>
+                </select>
+                <button id="processBtn" disabled>处理</button>
+            </div>
+            <div id="status"></div>
+            <img id="preview" style="display:none;">
+        </div>
+
+        <div class="card">
+            <h2>iOS 快捷指令</h2>
+            <p style="color:#aaa; line-height:1.6">
+                查看 <a href="https://github.com/你的用户名/filmgrain/blob/main/ios-shortcut/README.md"
+                style="color:#7dd3fc">配置指南</a> 创建快捷指令，实现从相册选图 → 添加胶片颗粒 → 保存。
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const imageInput = document.getElementById('imageInput');
+        const processBtn = document.getElementById('processBtn');
+        const preview = document.getElementById('preview');
+        const status = document.getElementById('status');
+        let imageBase64 = '';
+
+        imageInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    imageBase64 = ev.target.result.split(',')[1];
+                    preview.src = ev.target.result;
+                    preview.style.display = 'block';
+                    processBtn.disabled = false;
+                    status.textContent = '已选择: ' + file.name;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        processBtn.addEventListener('click', async () => {
+            if (!imageBase64) return;
+
+            processBtn.disabled = true;
+            status.textContent = '处理中...';
+
+            try {
+                const res = await fetch('/api/grain', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        image: imageBase64,
+                        iso: parseInt(document.getElementById('isoSelect').value),
+                        mode: document.getElementById('modeSelect').value
+                    })
+                });
+
+                const data = await res.json();
+                if (data.success) {
+                    preview.src = 'data:image/jpeg;base64,' + data.image;
+                    status.textContent = '✅ 处理完成 (右键保存图片)';
+                } else {
+                    status.textContent = '❌ 错误: ' + data.error;
+                }
+            } catch (err) {
+                status.textContent = '❌ 请求失败: ' + err.message;
+            }
+
+            processBtn.disabled = false;
+        });
+    </script>
+</body>
+</html>

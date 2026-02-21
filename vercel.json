@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/grain.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "api/index.html",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/grain",
+      "dest": "/api/grain.py"
+    },
+    {
+      "src": "/",
+      "dest": "/api/index.html"
+    }
+  ]
+}
