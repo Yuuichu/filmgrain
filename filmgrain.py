@@ -173,9 +173,10 @@ class FilmGrain:
         70% 小颗粒 (精细纹理) + 30% 大颗粒 (粗糙纹理)
         这模拟了真实胶片中混合尺寸的银盐晶体
         """
-        # 小颗粒层 (70%)
+        # 小颗粒层 (70%) - 使用 ceil 确保放大后尺寸足够
         small_scale = max(1, int(self.small_size))
-        small_h, small_w = max(1, height // small_scale), max(1, width // small_scale)
+        small_h = max(1, (height + small_scale - 1) // small_scale)
+        small_w = max(1, (width + small_scale - 1) // small_scale)
         small_noise = self.rng.standard_normal((small_h, small_w))
 
         if small_scale > 1:
@@ -184,7 +185,8 @@ class FilmGrain:
 
         # 大颗粒层 (30%)
         large_scale = max(1, int(self.large_size))
-        large_h, large_w = max(1, height // large_scale), max(1, width // large_scale)
+        large_h = max(1, (height + large_scale - 1) // large_scale)
+        large_w = max(1, (width + large_scale - 1) // large_scale)
         large_noise = self.rng.standard_normal((large_h, large_w))
 
         if large_scale > 1:

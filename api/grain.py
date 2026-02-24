@@ -104,7 +104,8 @@ class FilmGrain:
         """双峰分布颗粒: 70% 小 + 30% 大"""
         # 小颗粒
         small_scale = max(1, int(self.small_size))
-        small_h, small_w = max(1, height // small_scale), max(1, width // small_scale)
+        small_h = max(1, (height + small_scale - 1) // small_scale)
+        small_w = max(1, (width + small_scale - 1) // small_scale)
         small_noise = self.rng.standard_normal((small_h, small_w))
         if small_scale > 1:
             small_noise = np.repeat(np.repeat(small_noise, small_scale, axis=0), small_scale, axis=1)
@@ -112,7 +113,8 @@ class FilmGrain:
 
         # 大颗粒
         large_scale = max(1, int(self.large_size))
-        large_h, large_w = max(1, height // large_scale), max(1, width // large_scale)
+        large_h = max(1, (height + large_scale - 1) // large_scale)
+        large_w = max(1, (width + large_scale - 1) // large_scale)
         large_noise = self.rng.standard_normal((large_h, large_w))
         if large_scale > 1:
             large_noise = np.repeat(np.repeat(large_noise, large_scale, axis=0), large_scale, axis=1)
