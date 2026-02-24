@@ -20,17 +20,64 @@ import math
 
 
 class PerlinNoise:
-    """分形噪声生成器 - 用于有机聚簇效果"""
+    """Perlin 噪声生成器 - 真正的梯度噪声实现，用于有机聚簇效果"""
 
     def __init__(self, seed: int = None):
         self.rng = np.random.default_rng(seed)
+        # 生成排列表
+        p = np.arange(256, dtype=np.int32)
+        self.rng.shuffle(p)
+        self.perm = np.concatenate([p, p])  # 重复以避免溢出
+
+        # 预计算梯度向量 (8个方向)
+        self.gradients = np.array([
+            [1, 1], [-1, 1], [1, -1], [-1, -1],
+            [1, 0], [-1, 0], [0, 1], [0, -1]
+        ], dtype=np.float32)
+
+    def _fade(self, t):
+        """平滑插值曲线 6t^5 - 15t^4 + 10t^3 (Perlin 改进版)"""
+        return t * t * t * (t * (t * 6 - 15) + 10)
+
+    def noise2d(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """生成 2D Perlin 噪声"""
+        # 网格单元坐标
+        xi = np.floor(x).astype(np.int32)
+        yi = np.floor(y).astype(np.int32)
+
+        # 单元内相对坐标
+        xf = x - xi
+        yf = y - yi
+
+        # 限制索引范围
+        xi = xi & 255
+        yi = yi & 255
+
+        # 平滑插值权重
+        u = self._fade(xf)
+        v = self._fade(yf)
+
+        # 四个角的哈希值 (逐元素计算)
+        h00 = self.perm[self.perm[xi] + yi] & 7
+        h01 = self.perm[self.perm[xi] + yi + 1] & 7
+        h10 = self.perm[self.perm[xi + 1] + yi] & 7
+        h11 = self.perm[self.perm[xi + 1] + yi + 1] & 7
+
+        # 梯度点积
+        g00 = self.gradients[h00, 0] * xf + self.gradients[h00, 1] * yf
+        g10 = self.gradients[h10, 0] * (xf - 1) + self.gradients[h10, 1] * yf
+        g01 = self.gradients[h01, 0] * xf + self.gradients[h01, 1] * (yf - 1)
+        g11 = self.gradients[h11, 0] * (xf - 1) + self.gradients[h11, 1] * (yf - 1)
+
+        # 双线性插值
+        x1 = g00 + u * (g10 - g00)
+        x2 = g01 + u * (g11 - g01)
+        return x1 + v * (x2 - x1)
 
     def fractal_noise(self, width: int, height: int, scale: float = 50.0,
                       octaves: int = 4, persistence: float = 0.5) -> np.ndarray:
         """
-        生成分形噪声 (多层平滑噪声叠加)
-
-        使用双线性插值实现平滑的有机聚簇效果
+        生成分形噪声 (多层 Perlin 叠加)
 
         Args:
             width, height: 输出尺寸
@@ -38,26 +85,26 @@ class PerlinNoise:
             octaves: 叠加层数
             persistence: 高频衰减系数
         """
+        # 创建坐标网格
+        y_coords, x_coords = np.meshgrid(
+            np.arange(height, dtype=np.float32),
+            np.arange(width, dtype=np.float32),
+            indexing='ij'
+        )
+
         noise = np.zeros((height, width), dtype=np.float32)
         amplitude = 1.0
         max_amplitude = 0.0
-        current_scale = scale
+        freq = 1.0
 
         for _ in range(octaves):
-            # 生成低分辨率噪声
-            small_h = max(2, int(height / current_scale))
-            small_w = max(2, int(width / current_scale))
-            small_noise = self.rng.standard_normal((small_h, small_w)).astype(np.float32)
-
-            # 使用双线性插值放大到目标尺寸 (产生平滑过渡)
-            small_img = Image.fromarray(small_noise, mode='F')
-            large_img = small_img.resize((width, height), Image.Resampling.BILINEAR)
-            layer = np.array(large_img)
-
-            noise += amplitude * layer
+            noise += amplitude * self.noise2d(
+                x_coords * freq / scale,
+                y_coords * freq / scale
+            )
             max_amplitude += amplitude
             amplitude *= persistence
-            current_scale /= 2
+            freq *= 2
 
         return noise / max_amplitude
 
