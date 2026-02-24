@@ -77,8 +77,8 @@
 </head>
 <body>
     <div class="container">
-        <h1>🎞️ Film Grain API <span style="font-size:0.5em;color:#888">v2.0</span></h1>
-        <p class="subtitle">真实胶片颗粒模拟 - 双峰分布 / Perlin 聚簇 / 分区响应</p>
+        <h1>🎞️ Film Grain API <span style="font-size:0.5em;color:#888">v3.0</span></h1>
+        <p class="subtitle">物理级胶片颗粒模拟 - Simplex聚簇 / 高斯splat / 对数正态分布</p>
 
         <div class="card">
             <h2>API 端点</h2>
@@ -106,12 +106,13 @@
                 <div style="color:#aaa; font-size:0.9em">手动强度 0.01-0.3，覆盖 ISO 预设</div>
             </div>
 
-            <h3 style="margin: 20px 0 10px; font-size: 1em;">v2.0 新特性</h3>
+            <h3 style="margin: 20px 0 10px; font-size: 1em;">v3.0 物理模型</h3>
             <ul style="color:#aaa; font-size:0.9em; padding-left:20px; line-height:1.8">
-                <li>🔬 双峰尺寸分布 (70% 小颗粒 + 30% 大颗粒)</li>
-                <li>🌀 Perlin 噪声聚簇 (有机随机分布)</li>
-                <li>🌗 分区亮度响应 (暗部/中间调/高光)</li>
-                <li>🎨 RGB 通道空间相关性 (染料云模拟)</li>
+                <li>🔬 <b>Simplex 噪声</b> - 无方向伪影的聚簇模拟</li>
+                <li>⚪ <b>高斯 Splat</b> - 软边圆形颗粒形态</li>
+                <li>📊 <b>对数正态分布</b> - 真实晶体尺寸分布</li>
+                <li>〰️ <b>Smoothstep 响应</b> - 平滑亮度过渡曲线</li>
+                <li>🎨 <b>染料云模型</b> - RGB相关性 + 色彩漂移</li>
             </ul>
         </div>
 

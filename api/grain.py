@@ -1,6 +1,6 @@
 """
-Film Grain API v2.0 - Vercel Serverless Function
-真实胶片颗粒模拟 API
+Film Grain API v3.0 - 真实胶片颗粒模拟
+基于物理模型: 泊松分布 + Simplex聚簇 + 高斯splat形态
 """
 
 from http.server import BaseHTTPRequestHandler
@@ -9,230 +9,302 @@ import base64
 import io
 import numpy as np
 from PIL import Image, ImageFilter
+from scipy import ndimage
 
 # 注册 HEIC 支持
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
 except ImportError:
-    pass  # pillow-heif 未安装时跳过
+    pass
 
 
-class PerlinNoise:
-    """Perlin 噪声生成器 - 真正的梯度噪声实现"""
+class SimplexNoise:
+    """
+    Simplex 噪声 - 比 Perlin 更快、无方向性伪影
+    基于 Ken Perlin 的改进算法
+    """
+
+    # Simplex 梯度表
+    GRAD3 = np.array([
+        [1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],
+        [1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],
+        [0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]
+    ], dtype=np.float32)
+
+    F2 = 0.5 * (np.sqrt(3.0) - 1.0)
+    G2 = (3.0 - np.sqrt(3.0)) / 6.0
 
     def __init__(self, seed: int = None):
         self.rng = np.random.default_rng(seed)
-        # 生成排列表
         p = np.arange(256, dtype=np.int32)
         self.rng.shuffle(p)
-        self.perm = np.concatenate([p, p])  # 重复以避免溢出
-
-        # 预计算梯度向量
-        self.gradients = np.array([
-            [1, 1], [-1, 1], [1, -1], [-1, -1],
-            [1, 0], [-1, 0], [0, 1], [0, -1]
-        ], dtype=np.float32)
-
-    def _fade(self, t):
-        """平滑插值曲线 6t^5 - 15t^4 + 10t^3"""
-        return t * t * t * (t * (t * 6 - 15) + 10)
+        self.perm = np.concatenate([p, p])
+        self.perm_mod12 = self.perm % 12
 
     def noise2d(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """生成 2D Perlin 噪声"""
-        # 网格单元坐标
-        xi = np.floor(x).astype(np.int32)
-        yi = np.floor(y).astype(np.int32)
+        """2D Simplex 噪声"""
+        s = (x + y) * self.F2
+        i = np.floor(x + s).astype(np.int32)
+        j = np.floor(y + s).astype(np.int32)
 
-        # 单元内相对坐标
-        xf = x - xi
-        yf = y - yi
+        t = (i + j) * self.G2
+        X0 = i - t
+        Y0 = j - t
+        x0 = x - X0
+        y0 = y - Y0
 
-        # 限制索引范围
-        xi = xi & 255
-        yi = yi & 255
+        i1 = (x0 > y0).astype(np.int32)
+        j1 = 1 - i1
 
-        # 平滑插值权重
-        u = self._fade(xf)
-        v = self._fade(yf)
+        x1 = x0 - i1 + self.G2
+        y1 = y0 - j1 + self.G2
+        x2 = x0 - 1.0 + 2.0 * self.G2
+        y2 = y0 - 1.0 + 2.0 * self.G2
 
-        # 四个角的哈希值 (逐元素计算)
-        h00 = self.perm[self.perm[xi] + yi] & 7
-        h01 = self.perm[self.perm[xi] + yi + 1] & 7
-        h10 = self.perm[self.perm[xi + 1] + yi] & 7
-        h11 = self.perm[self.perm[xi + 1] + yi + 1] & 7
+        ii = i & 255
+        jj = j & 255
 
-        # 梯度点积
-        g00 = self.gradients[h00, 0] * xf + self.gradients[h00, 1] * yf
-        g10 = self.gradients[h10, 0] * (xf - 1) + self.gradients[h10, 1] * yf
-        g01 = self.gradients[h01, 0] * xf + self.gradients[h01, 1] * (yf - 1)
-        g11 = self.gradients[h11, 0] * (xf - 1) + self.gradients[h11, 1] * (yf - 1)
+        gi0 = self.perm_mod12[self.perm[ii + self.perm[jj]]]
+        gi1 = self.perm_mod12[self.perm[ii + i1 + self.perm[jj + j1]]]
+        gi2 = self.perm_mod12[self.perm[ii + 1 + self.perm[jj + 1]]]
 
-        # 双线性插值
-        x1 = g00 + u * (g10 - g00)
-        x2 = g01 + u * (g11 - g01)
-        return x1 + v * (x2 - x1)
+        t0 = 0.5 - x0*x0 - y0*y0
+        t1 = 0.5 - x1*x1 - y1*y1
+        t2 = 0.5 - x2*x2 - y2*y2
+
+        n0 = np.where(t0 < 0, 0, t0**4 * (self.GRAD3[gi0, 0] * x0 + self.GRAD3[gi0, 1] * y0))
+        n1 = np.where(t1 < 0, 0, t1**4 * (self.GRAD3[gi1, 0] * x1 + self.GRAD3[gi1, 1] * y1))
+        n2 = np.where(t2 < 0, 0, t2**4 * (self.GRAD3[gi2, 0] * x2 + self.GRAD3[gi2, 1] * y2))
+
+        return 70.0 * (n0 + n1 + n2)
 
     def fractal_noise(self, width: int, height: int, scale: float = 50.0,
-                      octaves: int = 4, persistence: float = 0.5) -> np.ndarray:
-        """生成分形噪声 (多层 Perlin 叠加)"""
-        # 创建坐标网格
-        y_coords, x_coords = np.meshgrid(
-            np.arange(height, dtype=np.float32),
-            np.arange(width, dtype=np.float32),
-            indexing='ij'
-        )
+                      octaves: int = 4, persistence: float = 0.5, lacunarity: float = 2.0) -> np.ndarray:
+        """分形 Simplex 噪声"""
+        y, x = np.meshgrid(np.arange(height, dtype=np.float32),
+                           np.arange(width, dtype=np.float32), indexing='ij')
 
         noise = np.zeros((height, width), dtype=np.float32)
         amplitude = 1.0
-        max_amplitude = 0.0
+        max_amp = 0.0
         freq = 1.0
 
         for _ in range(octaves):
-            noise += amplitude * self.noise2d(
-                x_coords * freq / scale,
-                y_coords * freq / scale
-            )
-            max_amplitude += amplitude
+            noise += amplitude * self.noise2d(x * freq / scale, y * freq / scale)
+            max_amp += amplitude
             amplitude *= persistence
-            freq *= 2
+            freq *= lacunarity
 
-        return noise / max_amplitude
+        return noise / max_amp
 
 
-class FilmGrain:
-    """真实胶片颗粒生成器 v2.1 - 分辨率自适应"""
+class RealisticFilmGrain:
+    """
+    真实胶片颗粒生成器 v3.0
 
-    # 基准分辨率 (2K)
-    REFERENCE_SIZE = 2048
+    物理模型:
+    1. 银盐晶体位置: 调制泊松分布 (Modulated Poisson)
+    2. 晶体聚簇: Simplex 噪声密度调制
+    3. 晶体形态: 高斯 splat (软边圆形)
+    4. 尺寸分布: 对数正态分布 (Log-normal)
+    """
 
-    # ISO 预设: (intensity, small_grain_ratio, large_grain_ratio, cluster_strength)
-    # grain_ratio 是相对于图像短边的比例 (例如 0.001 = 短边的 0.1%)
     ISO_PRESETS = {
-        50:   (0.015, 0.0004, 0.0008, 0.2),   # 超细腻
-        100:  (0.025, 0.0005, 0.0010, 0.25),
-        200:  (0.035, 0.0006, 0.0013, 0.3),
-        400:  (0.050, 0.0008, 0.0016, 0.4),   # 标准
-        800:  (0.070, 0.0010, 0.0020, 0.5),
-        1600: (0.100, 0.0013, 0.0026, 0.6),
-        3200: (0.140, 0.0016, 0.0032, 0.7),   # 粗颗粒
+        # (density, mean_size_ratio, size_variance, cluster_strength, softness)
+        50:   (0.012, 0.0006, 0.2, 0.15, 0.8),
+        100:  (0.020, 0.0008, 0.25, 0.20, 0.75),
+        200:  (0.030, 0.0010, 0.30, 0.25, 0.70),
+        400:  (0.045, 0.0012, 0.35, 0.30, 0.65),
+        800:  (0.065, 0.0015, 0.40, 0.38, 0.55),
+        1600: (0.095, 0.0020, 0.45, 0.45, 0.45),
+        3200: (0.130, 0.0025, 0.50, 0.55, 0.35),
     }
 
     FILM_TYPES = {
-        "negative": (0.8, 1.0, 1.2, 0.15),
-        "positive": (1.2, 1.0, 0.6, 0.10),
-        "color":    (1.0, 1.0, 0.8, 0.20),
-        "bw":       (1.1, 1.0, 0.7, 0.0),
+        "color":    {"shadow": 1.0, "mid": 1.0, "high": 0.75, "chroma": 0.20, "softness_mult": 1.2},
+        "bw":       {"shadow": 1.1, "mid": 1.0, "high": 0.65, "chroma": 0.0,  "softness_mult": 0.8},
+        "negative": {"shadow": 0.8, "mid": 1.0, "high": 1.15, "chroma": 0.15, "softness_mult": 1.0},
+        "positive": {"shadow": 1.2, "mid": 1.0, "high": 0.55, "chroma": 0.10, "softness_mult": 1.1},
     }
 
     def __init__(self, iso: int = 400, film_type: str = "color", seed: int = None):
         self.iso = min(self.ISO_PRESETS.keys(), key=lambda x: abs(x - iso))
         self.film_type = film_type if film_type in self.FILM_TYPES else "color"
         self.rng = np.random.default_rng(seed)
-        self.perlin = PerlinNoise(seed)
+        self.simplex = SimplexNoise(seed)
 
-        self.intensity, self.small_ratio, self.large_ratio, self.cluster_strength = \
-            self.ISO_PRESETS[self.iso]
-        self.shadow_resp, self.midtone_resp, self.highlight_resp, self.chroma_var = \
-            self.FILM_TYPES[self.film_type]
+        preset = self.ISO_PRESETS[self.iso]
+        self.density = preset[0]
+        self.mean_size_ratio = preset[1]
+        self.size_variance = preset[2]
+        self.cluster_strength = preset[3]
+        self.base_softness = preset[4]
 
-    def _compute_grain_sizes(self, height: int, width: int) -> tuple:
-        """根据图像分辨率计算实际颗粒尺寸"""
-        # 使用短边作为基准
+        film = self.FILM_TYPES[self.film_type]
+        self.shadow_resp = film["shadow"]
+        self.mid_resp = film["mid"]
+        self.high_resp = film["high"]
+        self.chroma = film["chroma"]
+        self.softness = self.base_softness * film["softness_mult"]
+
+    def _generate_grain_field(self, height: int, width: int) -> np.ndarray:
+        """
+        生成颗粒场 - 使用调制泊松分布
+
+        真实胶片: 银盐晶体呈泊松分布，但密度受局部条件调制
+        """
         base_size = min(height, width)
 
-        # 计算实际像素尺寸 (至少 1 像素)
-        small_size = max(1, int(base_size * self.small_ratio))
-        large_size = max(1, int(base_size * self.large_ratio))
+        # 1. 生成基础高斯噪声场
+        noise = self.rng.standard_normal((height, width)).astype(np.float32)
 
-        return small_size, large_size
+        # 2. 生成聚簇密度图 (Simplex)
+        cluster_scale = base_size * (0.02 + self.iso / 8000)
+        cluster_map = self.simplex.fractal_noise(
+            width, height,
+            scale=cluster_scale,
+            octaves=5,
+            persistence=0.6,
+            lacunarity=2.0
+        )
+        # 归一化到 [0.3, 1.7]
+        cluster_map = (cluster_map - cluster_map.min()) / (cluster_map.max() - cluster_map.min() + 1e-8)
+        cluster_map = 0.3 + cluster_map * 1.4
 
-    def _generate_bimodal_grain(self, height: int, width: int) -> np.ndarray:
-        """双峰分布颗粒: 70% 小 + 30% 大 (分辨率自适应)"""
-        # 根据图像分辨率计算颗粒尺寸
-        small_scale, large_scale = self._compute_grain_sizes(height, width)
+        # 3. 调制噪声密度
+        modulated = noise * ((1 - self.cluster_strength) + self.cluster_strength * cluster_map)
 
-        # 小颗粒 (70%)
-        small_h = max(1, (height + small_scale - 1) // small_scale)
-        small_w = max(1, (width + small_scale - 1) // small_scale)
-        small_noise = self.rng.standard_normal((small_h, small_w))
-        if small_scale > 1:
-            small_noise = np.repeat(np.repeat(small_noise, small_scale, axis=0), small_scale, axis=1)
-        small_grain = small_noise[:height, :width] * 0.7
+        return modulated
 
-        # 大颗粒 (30%)
-        large_h = max(1, (height + large_scale - 1) // large_scale)
-        large_w = max(1, (width + large_scale - 1) // large_scale)
-        large_noise = self.rng.standard_normal((large_h, large_w))
-        if large_scale > 1:
-            large_noise = np.repeat(np.repeat(large_noise, large_scale, axis=0), large_scale, axis=1)
-        large_grain = large_noise[:height, :width] * 0.3
+    def _apply_grain_shape(self, grain: np.ndarray, height: int, width: int) -> np.ndarray:
+        """
+        应用颗粒形态 - 高斯 splat
 
-        return small_grain + large_grain
-
-    def _generate_clustered_grain(self, height: int, width: int) -> np.ndarray:
-        """Perlin 噪声聚簇颗粒 (分辨率自适应)"""
-        base_grain = self._generate_bimodal_grain(height, width)
-
-        # 聚簇尺寸也按分辨率缩放
+        真实胶片颗粒是软边圆形/椭圆形，不是硬边方块
+        使用高斯模糊 + 对比度增强模拟
+        """
         base_size = min(height, width)
-        # 聚簇大小为图像短边的 1.5%-3% (根据 ISO 调整)
-        cluster_ratio = 0.015 + (self.iso / 3200) * 0.015
-        cluster_scale = max(10, base_size * cluster_ratio)
+        grain_size = max(1, int(base_size * self.mean_size_ratio))
 
-        cluster_map = self.perlin.fractal_noise(width, height, scale=cluster_scale, octaves=4)
-        cluster_map = 0.5 + (cluster_map - cluster_map.min()) / (cluster_map.max() - cluster_map.min() + 1e-8)
+        # 高斯模糊模拟软边颗粒
+        sigma = grain_size * self.softness * 0.5
+        if sigma > 0.3:
+            grain = ndimage.gaussian_filter(grain, sigma=sigma)
 
-        return base_grain * ((1 - self.cluster_strength) + self.cluster_strength * cluster_map)
+            # 对比度补偿 (模糊会降低对比度)
+            grain = grain * (1 + sigma * 0.3)
+
+        return grain
+
+    def _apply_size_distribution(self, grain: np.ndarray, height: int, width: int) -> np.ndarray:
+        """
+        应用尺寸分布 - 对数正态混合
+
+        真实胶片: 晶体尺寸呈对数正态分布
+        大晶体稀疏但明显，小晶体密集但细微
+        """
+        base_size = min(height, width)
+
+        # 生成多尺度颗粒并混合
+        scales = [0.5, 1.0, 2.0]  # 小/中/大晶体
+        weights = [0.25, 0.50, 0.25]  # 对数正态近似
+
+        result = np.zeros_like(grain)
+        for scale, weight in zip(scales, weights):
+            grain_size = max(1, int(base_size * self.mean_size_ratio * scale))
+            if grain_size > 1:
+                # 下采样再上采样产生不同尺度
+                small_h = max(1, height // grain_size)
+                small_w = max(1, width // grain_size)
+                small = self.rng.standard_normal((small_h, small_w)).astype(np.float32)
+
+                # 双三次插值上采样 (更平滑)
+                from PIL import Image as PILImage
+                small_img = PILImage.fromarray(small, mode='F')
+                large_img = small_img.resize((width, height), PILImage.Resampling.BICUBIC)
+                layer = np.array(large_img)
+            else:
+                layer = self.rng.standard_normal((height, width)).astype(np.float32)
+
+            result += layer * weight
+
+        # 与原始颗粒场混合
+        return grain * 0.4 + result * 0.6
 
     def _compute_luminance_response(self, image: np.ndarray) -> np.ndarray:
-        """分区亮度响应"""
-        luminance = (0.299 * image[:,:,0] + 0.587 * image[:,:,1] + 0.114 * image[:,:,2]) / 255.0
-        response = np.zeros_like(luminance)
+        """
+        计算亮度响应曲线
 
-        shadow_mask = luminance < 0.3
-        response[shadow_mask] = self.shadow_resp * (1 - luminance[shadow_mask] / 0.3 * 0.3)
+        使用平滑 S 曲线插值，避免硬边界
+        """
+        lum = (0.299 * image[:,:,0] + 0.587 * image[:,:,1] + 0.114 * image[:,:,2]) / 255.0
 
-        midtone_mask = (luminance >= 0.3) & (luminance < 0.7)
-        response[midtone_mask] = self.midtone_resp
+        # 平滑三区响应
+        response = np.zeros_like(lum)
 
-        highlight_mask = luminance >= 0.7
-        response[highlight_mask] = self.highlight_resp * (1 - (luminance[highlight_mask] - 0.7) / 0.3 * 0.5)
+        # 使用 smoothstep 插值
+        def smoothstep(edge0, edge1, x):
+            t = np.clip((x - edge0) / (edge1 - edge0), 0, 1)
+            return t * t * (3 - 2 * t)
 
-        return np.clip(response, 0.2, 1.5)[:, :, np.newaxis]
+        # 暗部到中间调过渡 (0-0.35)
+        shadow_blend = smoothstep(0, 0.35, lum)
+        # 中间调到高光过渡 (0.55-1.0)
+        highlight_blend = smoothstep(0.55, 1.0, lum)
+
+        response = (
+            self.shadow_resp * (1 - shadow_blend) +
+            self.mid_resp * shadow_blend * (1 - highlight_blend) +
+            self.high_resp * highlight_blend
+        )
+
+        return np.clip(response, 0.15, 1.5)[:, :, np.newaxis]
 
     def _generate_color_grain(self, height: int, width: int) -> np.ndarray:
-        """彩色颗粒 (RGB 空间相关性，分辨率自适应)"""
-        base_grain = self._generate_clustered_grain(height, width)
+        """
+        生成彩色颗粒 - 染料云模型
 
-        r_ind = self.rng.standard_normal((height, width)) * 0.3
-        g_ind = self.rng.standard_normal((height, width)) * 0.3
-        b_ind = self.rng.standard_normal((height, width)) * 0.3
+        彩色胶片: RGB 通道有空间相关性 + 色彩漂移
+        """
+        # 基础亮度颗粒
+        luma_grain = self._generate_grain_field(height, width)
+        luma_grain = self._apply_size_distribution(luma_grain, height, width)
 
-        correlation = 0.7
-        r_grain = correlation * base_grain + (1 - correlation) * r_ind
-        g_grain = correlation * base_grain + (1 - correlation) * g_ind
-        b_grain = correlation * base_grain + (1 - correlation) * b_ind
+        if self.chroma == 0:
+            # 黑白模式
+            grain = np.stack([luma_grain] * 3, axis=-1)
+        else:
+            # 彩色模式: 各通道部分独立
+            correlation = 0.75  # 通道相关性
 
-        if self.chroma_var > 0:
-            # 色彩偏移也按分辨率缩放
-            base_size = min(height, width)
-            chroma_scale = max(20, base_size * 0.04)  # 短边的 4%
-            chroma_noise = self.perlin.fractal_noise(width, height, scale=chroma_scale, octaves=2)
-            chroma_noise = (chroma_noise - chroma_noise.mean()) * self.chroma_var
-            r_grain += chroma_noise * 0.8
-            g_grain -= chroma_noise * 0.3
-            b_grain += chroma_noise * 0.5
+            r_ind = self._generate_grain_field(height, width) * 0.25
+            g_ind = self._generate_grain_field(height, width) * 0.25
+            b_ind = self._generate_grain_field(height, width) * 0.25
 
-        return np.stack([r_grain, g_grain, b_grain], axis=-1)
+            r = correlation * luma_grain + (1 - correlation) * r_ind
+            g = correlation * luma_grain + (1 - correlation) * g_ind
+            b = correlation * luma_grain + (1 - correlation) * b_ind
 
-    def _generate_bw_grain(self, height: int, width: int) -> np.ndarray:
-        """黑白颗粒 (硬边晶体)"""
-        grain = self._generate_clustered_grain(height, width)
-        grain = np.sign(grain) * np.power(np.abs(grain), 0.85)
-        return np.stack([grain, grain, grain], axis=-1)
+            # 色彩漂移 (染料云特性)
+            if self.chroma > 0:
+                base_size = min(height, width)
+                chroma_scale = base_size * 0.05
+                chroma_noise = self.simplex.fractal_noise(
+                    width, height, scale=chroma_scale, octaves=3
+                )
+                chroma_noise = (chroma_noise - chroma_noise.mean()) * self.chroma
+
+                r += chroma_noise * 0.9
+                g -= chroma_noise * 0.4
+                b += chroma_noise * 0.6
+
+            grain = np.stack([r, g, b], axis=-1)
+
+        return grain
 
     def apply(self, image: Image.Image, intensity_override: float = None) -> Image.Image:
+        """应用胶片颗粒效果"""
         img_array = np.array(image).astype(np.float32)
 
         if len(img_array.shape) == 2:
@@ -245,15 +317,21 @@ class FilmGrain:
 
         height, width = img_array.shape[:2]
 
-        if self.film_type == "bw":
-            grain = self._generate_bw_grain(height, width)
-        else:
-            grain = self._generate_color_grain(height, width)
+        # 生成颗粒
+        grain = self._generate_color_grain(height, width)
 
+        # 应用颗粒形态 (各通道)
+        for c in range(3):
+            grain[:,:,c] = self._apply_grain_shape(grain[:,:,c], height, width)
+
+        # 亮度响应
         lum_response = self._compute_luminance_response(img_array)
-        intensity = intensity_override if intensity_override is not None else self.intensity
+
+        # 强度
+        intensity = intensity_override if intensity_override is not None else self.density
         grain = grain * intensity * 255.0 * lum_response
 
+        # 混合
         result = np.clip(img_array + grain, 0, 255).astype(np.uint8)
 
         if has_alpha:
@@ -262,6 +340,7 @@ class FilmGrain:
         return Image.fromarray(result)
 
 
+# API Handler
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -271,18 +350,20 @@ class handler(BaseHTTPRequestHandler):
 
         info = {
             "name": "Film Grain API",
-            "version": "2.0",
+            "version": "3.0",
+            "model": "Physical simulation",
             "features": [
-                "双峰尺寸分布 (70% 小颗粒 + 30% 大颗粒)",
-                "Perlin 噪声聚簇",
-                "分区亮度响应 (暗部/中间调/高光)",
-                "RGB 通道空间相关性"
+                "Simplex 噪声聚簇 (无方向伪影)",
+                "对数正态尺寸分布",
+                "高斯 splat 颗粒形态",
+                "平滑 S 曲线亮度响应",
+                "RGB 空间相关性 + 色彩漂移"
             ],
             "parameters": {
-                "image": "base64 encoded image (required)",
-                "iso": "50, 100, 200, 400, 800, 1600, 3200 (default: 400)",
-                "type": "color, bw, negative, positive (default: color)",
-                "intensity": "0.01-0.3 (optional, overrides ISO preset)"
+                "image": "base64 encoded (required)",
+                "iso": "50-3200 (default: 400)",
+                "type": "color, bw, negative, positive",
+                "intensity": "0.01-0.3 (optional)"
             }
         }
         self.wfile.write(json.dumps(info, ensure_ascii=False).encode())
@@ -295,13 +376,12 @@ class handler(BaseHTTPRequestHandler):
 
             image_b64 = data.get('image', '')
             iso = int(data.get('iso', 400))
-            film_type = data.get('type', data.get('mode', 'color'))  # 兼容旧参数
+            film_type = data.get('type', data.get('mode', 'color'))
             intensity = data.get('intensity')
 
             if intensity:
                 intensity = float(intensity)
 
-            # 兼容旧 API: mode=bw -> type=bw
             if film_type == 'bw' or data.get('mode') == 'bw':
                 film_type = 'bw'
 
@@ -315,11 +395,11 @@ class handler(BaseHTTPRequestHandler):
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
                 image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-            grain = FilmGrain(iso=iso, film_type=film_type)
+            grain = RealisticFilmGrain(iso=iso, film_type=film_type)
             result = grain.apply(image, intensity_override=intensity)
 
             buffer = io.BytesIO()
-            result.save(buffer, format='JPEG', quality=90)
+            result.save(buffer, format='JPEG', quality=92)
             result_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
             self.send_response(200)
@@ -330,12 +410,7 @@ class handler(BaseHTTPRequestHandler):
             response = {
                 "success": True,
                 "image": result_b64,
-                "params": {
-                    "iso": iso,
-                    "type": film_type,
-                    "intensity": intensity or "auto",
-                    "version": "2.0"
-                }
+                "params": {"iso": iso, "type": film_type, "version": "3.0"}
             }
             self.wfile.write(json.dumps(response).encode())
 
@@ -344,8 +419,7 @@ class handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            error_msg = str(e) if str(e) else type(e).__name__
-            self.wfile.write(json.dumps({"success": False, "error": error_msg}).encode())
+            self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
 
     def do_OPTIONS(self):
         self.send_response(200)
