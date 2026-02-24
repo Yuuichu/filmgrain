@@ -94,16 +94,21 @@ class PerlinNoise:
 
 
 class FilmGrain:
-    """真实胶片颗粒生成器 v2.0"""
+    """真实胶片颗粒生成器 v2.1 - 分辨率自适应"""
 
+    # 基准分辨率 (2K)
+    REFERENCE_SIZE = 2048
+
+    # ISO 预设: (intensity, small_grain_ratio, large_grain_ratio, cluster_strength)
+    # grain_ratio 是相对于图像短边的比例 (例如 0.001 = 短边的 0.1%)
     ISO_PRESETS = {
-        50:   (0.015, 0.8, 1.5, 0.2),
-        100:  (0.025, 1.0, 2.0, 0.25),
-        200:  (0.035, 1.2, 2.5, 0.3),
-        400:  (0.050, 1.5, 3.0, 0.4),
-        800:  (0.070, 2.0, 4.0, 0.5),
-        1600: (0.100, 2.5, 5.0, 0.6),
-        3200: (0.140, 3.0, 6.0, 0.7),
+        50:   (0.015, 0.0004, 0.0008, 0.2),   # 超细腻
+        100:  (0.025, 0.0005, 0.0010, 0.25),
+        200:  (0.035, 0.0006, 0.0013, 0.3),
+        400:  (0.050, 0.0008, 0.0016, 0.4),   # 标准
+        800:  (0.070, 0.0010, 0.0020, 0.5),
+        1600: (0.100, 0.0013, 0.0026, 0.6),
+        3200: (0.140, 0.0016, 0.0032, 0.7),   # 粗颗粒
     }
 
     FILM_TYPES = {
@@ -119,15 +124,28 @@ class FilmGrain:
         self.rng = np.random.default_rng(seed)
         self.perlin = PerlinNoise(seed)
 
-        self.intensity, self.small_size, self.large_size, self.cluster_strength = \
+        self.intensity, self.small_ratio, self.large_ratio, self.cluster_strength = \
             self.ISO_PRESETS[self.iso]
         self.shadow_resp, self.midtone_resp, self.highlight_resp, self.chroma_var = \
             self.FILM_TYPES[self.film_type]
 
+    def _compute_grain_sizes(self, height: int, width: int) -> tuple:
+        """根据图像分辨率计算实际颗粒尺寸"""
+        # 使用短边作为基准
+        base_size = min(height, width)
+
+        # 计算实际像素尺寸 (至少 1 像素)
+        small_size = max(1, int(base_size * self.small_ratio))
+        large_size = max(1, int(base_size * self.large_ratio))
+
+        return small_size, large_size
+
     def _generate_bimodal_grain(self, height: int, width: int) -> np.ndarray:
-        """双峰分布颗粒: 70% 小 + 30% 大"""
-        # 小颗粒
-        small_scale = max(1, int(self.small_size))
+        """双峰分布颗粒: 70% 小 + 30% 大 (分辨率自适应)"""
+        # 根据图像分辨率计算颗粒尺寸
+        small_scale, large_scale = self._compute_grain_sizes(height, width)
+
+        # 小颗粒 (70%)
         small_h = max(1, (height + small_scale - 1) // small_scale)
         small_w = max(1, (width + small_scale - 1) // small_scale)
         small_noise = self.rng.standard_normal((small_h, small_w))
@@ -135,8 +153,7 @@ class FilmGrain:
             small_noise = np.repeat(np.repeat(small_noise, small_scale, axis=0), small_scale, axis=1)
         small_grain = small_noise[:height, :width] * 0.7
 
-        # 大颗粒
-        large_scale = max(1, int(self.large_size))
+        # 大颗粒 (30%)
         large_h = max(1, (height + large_scale - 1) // large_scale)
         large_w = max(1, (width + large_scale - 1) // large_scale)
         large_noise = self.rng.standard_normal((large_h, large_w))
@@ -147,11 +164,16 @@ class FilmGrain:
         return small_grain + large_grain
 
     def _generate_clustered_grain(self, height: int, width: int) -> np.ndarray:
-        """Perlin 噪声聚簇颗粒"""
+        """Perlin 噪声聚簇颗粒 (分辨率自适应)"""
         base_grain = self._generate_bimodal_grain(height, width)
 
-        cluster_scale = 30 + self.iso / 50
-        cluster_map = self.perlin.fractal_noise(width, height, scale=cluster_scale, octaves=3)
+        # 聚簇尺寸也按分辨率缩放
+        base_size = min(height, width)
+        # 聚簇大小为图像短边的 1.5%-3% (根据 ISO 调整)
+        cluster_ratio = 0.015 + (self.iso / 3200) * 0.015
+        cluster_scale = max(10, base_size * cluster_ratio)
+
+        cluster_map = self.perlin.fractal_noise(width, height, scale=cluster_scale, octaves=4)
         cluster_map = 0.5 + (cluster_map - cluster_map.min()) / (cluster_map.max() - cluster_map.min() + 1e-8)
 
         return base_grain * ((1 - self.cluster_strength) + self.cluster_strength * cluster_map)
@@ -173,7 +195,7 @@ class FilmGrain:
         return np.clip(response, 0.2, 1.5)[:, :, np.newaxis]
 
     def _generate_color_grain(self, height: int, width: int) -> np.ndarray:
-        """彩色颗粒 (RGB 空间相关性)"""
+        """彩色颗粒 (RGB 空间相关性，分辨率自适应)"""
         base_grain = self._generate_clustered_grain(height, width)
 
         r_ind = self.rng.standard_normal((height, width)) * 0.3
@@ -186,7 +208,10 @@ class FilmGrain:
         b_grain = correlation * base_grain + (1 - correlation) * b_ind
 
         if self.chroma_var > 0:
-            chroma_noise = self.perlin.fractal_noise(width, height, scale=80, octaves=2)
+            # 色彩偏移也按分辨率缩放
+            base_size = min(height, width)
+            chroma_scale = max(20, base_size * 0.04)  # 短边的 4%
+            chroma_noise = self.perlin.fractal_noise(width, height, scale=chroma_scale, octaves=2)
             chroma_noise = (chroma_noise - chroma_noise.mean()) * self.chroma_var
             r_grain += chroma_noise * 0.8
             g_grain -= chroma_noise * 0.3
