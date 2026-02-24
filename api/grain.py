@@ -10,6 +10,13 @@ import io
 import numpy as np
 from PIL import Image, ImageFilter
 
+# 注册 HEIC 支持
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass  # pillow-heif 未安装时跳过
+
 
 class PerlinNoise:
     """Perlin 噪声生成器 - 真正的梯度噪声实现"""
