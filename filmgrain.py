@@ -20,68 +20,17 @@ import math
 
 
 class PerlinNoise:
-    """Perlin 噪声生成器 - 用于有机聚簇效果"""
+    """分形噪声生成器 - 用于有机聚簇效果"""
 
     def __init__(self, seed: int = None):
         self.rng = np.random.default_rng(seed)
-        # 生成排列表
-        self.perm = np.arange(256, dtype=np.int32)
-        self.rng.shuffle(self.perm)
-        self.perm = np.stack([self.perm, self.perm]).flatten()
-
-    def _fade(self, t):
-        """平滑插值函数 6t^5 - 15t^4 + 10t^3"""
-        return t * t * t * (t * (t * 6 - 15) + 10)
-
-    def _lerp(self, a, b, t):
-        """线性插值"""
-        return a + t * (b - a)
-
-    def _grad(self, hash_val, x, y):
-        """梯度函数"""
-        h = hash_val & 3
-        grad_vectors = [(1, 1), (-1, 1), (1, -1), (-1, -1)]
-        g = grad_vectors[h]
-        return g[0] * x + g[1] * y
-
-    def noise2d(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """生成 2D Perlin 噪声"""
-        # 整数部分
-        xi = x.astype(np.int32) & 255
-        yi = y.astype(np.int32) & 255
-
-        # 小数部分
-        xf = x - np.floor(x)
-        yf = y - np.floor(y)
-
-        # 平滑插值权重
-        u = self._fade(xf)
-        v = self._fade(yf)
-
-        # 哈希值
-        aa = self.perm[self.perm[xi] + yi]
-        ab = self.perm[self.perm[xi] + yi + 1]
-        ba = self.perm[self.perm[xi + 1] + yi]
-        bb = self.perm[self.perm[xi + 1] + yi + 1]
-
-        # 梯度计算
-        x1 = self._lerp(
-            self._grad(aa, xf, yf),
-            self._grad(ba, xf - 1, yf),
-            u
-        )
-        x2 = self._lerp(
-            self._grad(ab, xf, yf - 1),
-            self._grad(bb, xf - 1, yf - 1),
-            u
-        )
-
-        return self._lerp(x1, x2, v)
 
     def fractal_noise(self, width: int, height: int, scale: float = 50.0,
                       octaves: int = 4, persistence: float = 0.5) -> np.ndarray:
         """
-        生成分形噪声 (多层 Perlin 叠加)
+        生成分形噪声 (多层平滑噪声叠加)
+
+        使用双线性插值实现平滑的有机聚簇效果
 
         Args:
             width, height: 输出尺寸
@@ -89,21 +38,26 @@ class PerlinNoise:
             octaves: 叠加层数
             persistence: 高频衰减系数
         """
-        y_coords, x_coords = np.meshgrid(
-            np.arange(height, dtype=np.float32),
-            np.arange(width, dtype=np.float32),
-            indexing='ij'
-        )
-
         noise = np.zeros((height, width), dtype=np.float32)
         amplitude = 1.0
         max_amplitude = 0.0
+        current_scale = scale
 
         for _ in range(octaves):
-            noise += amplitude * self.noise2d(x_coords / scale, y_coords / scale)
+            # 生成低分辨率噪声
+            small_h = max(2, int(height / current_scale))
+            small_w = max(2, int(width / current_scale))
+            small_noise = self.rng.standard_normal((small_h, small_w)).astype(np.float32)
+
+            # 使用双线性插值放大到目标尺寸 (产生平滑过渡)
+            small_img = Image.fromarray(small_noise, mode='F')
+            large_img = small_img.resize((width, height), Image.Resampling.BILINEAR)
+            layer = np.array(large_img)
+
+            noise += amplitude * layer
             max_amplitude += amplitude
             amplitude *= persistence
-            scale /= 2
+            current_scale /= 2
 
         return noise / max_amplitude
 
