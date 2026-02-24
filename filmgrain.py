@@ -1,146 +1,336 @@
 #!/usr/bin/env python3
 """
-Film Grain Effect Generator
-基于胶片颗粒特性研究的图像处理脚本
+Film Grain Effect Generator v2.0
+真实胶片颗粒模拟 - 基于专业研究数据
 
 特性:
-- 支持 ISO 感光度模拟 (50-3200)
-- 黑白/彩色胶片颗粒差异
-- 亮度响应 (暗部颗粒更明显)
-- 有机随机分布
+- 双峰尺寸分布 (70% 小颗粒 + 30% 大颗粒)
+- Perlin 噪声聚簇 (有机随机分布)
+- 分区亮度响应 (暗部/中间调/高光)
+- RGB 通道空间相关性 (染料云模拟)
+- 负片/正片模式
 """
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 import argparse
 from pathlib import Path
+from typing import Tuple, Optional
+import math
+
+
+class PerlinNoise:
+    """Perlin 噪声生成器 - 用于有机聚簇效果"""
+
+    def __init__(self, seed: int = None):
+        self.rng = np.random.default_rng(seed)
+        # 生成排列表
+        self.perm = np.arange(256, dtype=np.int32)
+        self.rng.shuffle(self.perm)
+        self.perm = np.stack([self.perm, self.perm]).flatten()
+
+    def _fade(self, t):
+        """平滑插值函数 6t^5 - 15t^4 + 10t^3"""
+        return t * t * t * (t * (t * 6 - 15) + 10)
+
+    def _lerp(self, a, b, t):
+        """线性插值"""
+        return a + t * (b - a)
+
+    def _grad(self, hash_val, x, y):
+        """梯度函数"""
+        h = hash_val & 3
+        grad_vectors = [(1, 1), (-1, 1), (1, -1), (-1, -1)]
+        g = grad_vectors[h]
+        return g[0] * x + g[1] * y
+
+    def noise2d(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """生成 2D Perlin 噪声"""
+        # 整数部分
+        xi = x.astype(np.int32) & 255
+        yi = y.astype(np.int32) & 255
+
+        # 小数部分
+        xf = x - np.floor(x)
+        yf = y - np.floor(y)
+
+        # 平滑插值权重
+        u = self._fade(xf)
+        v = self._fade(yf)
+
+        # 哈希值
+        aa = self.perm[self.perm[xi] + yi]
+        ab = self.perm[self.perm[xi] + yi + 1]
+        ba = self.perm[self.perm[xi + 1] + yi]
+        bb = self.perm[self.perm[xi + 1] + yi + 1]
+
+        # 梯度计算
+        x1 = self._lerp(
+            self._grad(aa, xf, yf),
+            self._grad(ba, xf - 1, yf),
+            u
+        )
+        x2 = self._lerp(
+            self._grad(ab, xf, yf - 1),
+            self._grad(bb, xf - 1, yf - 1),
+            u
+        )
+
+        return self._lerp(x1, x2, v)
+
+    def fractal_noise(self, width: int, height: int, scale: float = 50.0,
+                      octaves: int = 4, persistence: float = 0.5) -> np.ndarray:
+        """
+        生成分形噪声 (多层 Perlin 叠加)
+
+        Args:
+            width, height: 输出尺寸
+            scale: 基础缩放 (越大 = 聚簇越大)
+            octaves: 叠加层数
+            persistence: 高频衰减系数
+        """
+        y_coords, x_coords = np.meshgrid(
+            np.arange(height, dtype=np.float32),
+            np.arange(width, dtype=np.float32),
+            indexing='ij'
+        )
+
+        noise = np.zeros((height, width), dtype=np.float32)
+        amplitude = 1.0
+        max_amplitude = 0.0
+
+        for _ in range(octaves):
+            noise += amplitude * self.noise2d(x_coords / scale, y_coords / scale)
+            max_amplitude += amplitude
+            amplitude *= persistence
+            scale /= 2
+
+        return noise / max_amplitude
 
 
 class FilmGrain:
-    """胶片颗粒生成器"""
+    """
+    真实胶片颗粒生成器 v2.0
 
-    # ISO 预设参数 (intensity, size, roughness)
+    基于 Dehancer 算法研究和 City Frame Photography 技术文档
+    """
+
+    # ISO 预设: (base_intensity, small_grain_size, large_grain_size, cluster_strength)
     ISO_PRESETS = {
-        50:   (0.02, 1.0, 0.3),
-        100:  (0.03, 1.2, 0.4),
-        200:  (0.04, 1.4, 0.5),
-        400:  (0.06, 1.6, 0.6),
-        800:  (0.08, 2.0, 0.7),
-        1600: (0.12, 2.5, 0.8),
-        3200: (0.18, 3.0, 0.9),
+        50:   (0.015, 0.8, 1.5, 0.2),   # 超细腻
+        100:  (0.025, 1.0, 2.0, 0.25),  # 细腻
+        200:  (0.035, 1.2, 2.5, 0.3),   # 细腻-中等
+        400:  (0.050, 1.5, 3.0, 0.4),   # 标准
+        800:  (0.070, 2.0, 4.0, 0.5),   # 明显
+        1600: (0.100, 2.5, 5.0, 0.6),   # 粗颗粒
+        3200: (0.140, 3.0, 6.0, 0.7),   # 超粗颗粒
     }
 
-    def __init__(self, iso: int = 400, color_mode: str = "color", seed: int = None):
+    # 胶片类型预设
+    FILM_TYPES = {
+        # (shadow_response, midtone_response, highlight_response, chroma_variance)
+        "negative": (0.8, 1.0, 1.2, 0.15),   # 负片: 高光颗粒更多
+        "positive": (1.2, 1.0, 0.6, 0.10),   # 正片: 暗部颗粒更多
+        "color":    (1.0, 1.0, 0.8, 0.20),   # 彩色负片
+        "bw":       (1.1, 1.0, 0.7, 0.0),    # 黑白负片
+    }
+
+    def __init__(
+        self,
+        iso: int = 400,
+        film_type: str = "color",
+        seed: int = None
+    ):
         """
         初始化胶片颗粒生成器
 
         Args:
             iso: ISO 感光度 (50-3200)
-            color_mode: "color" 彩色胶片 / "bw" 黑白胶片
-            seed: 随机种子 (用于可重复结果)
+            film_type: 胶片类型 ("negative", "positive", "color", "bw")
+            seed: 随机种子
         """
-        self.iso = self._clamp_iso(iso)
-        self.color_mode = color_mode
+        self.iso = self._find_nearest_iso(iso)
+        self.film_type = film_type if film_type in self.FILM_TYPES else "color"
+        self.seed = seed
         self.rng = np.random.default_rng(seed)
+        self.perlin = PerlinNoise(seed)
 
-        # 获取 ISO 对应的参数
-        self.intensity, self.grain_size, self.roughness = self._get_iso_params()
+        # 获取预设参数
+        self.intensity, self.small_size, self.large_size, self.cluster_strength = \
+            self.ISO_PRESETS[self.iso]
+        self.shadow_resp, self.midtone_resp, self.highlight_resp, self.chroma_var = \
+            self.FILM_TYPES[self.film_type]
 
-    def _clamp_iso(self, iso: int) -> int:
-        """限制 ISO 到有效范围"""
+    def _find_nearest_iso(self, iso: int) -> int:
+        """找到最近的 ISO 预设值"""
         valid_isos = sorted(self.ISO_PRESETS.keys())
-        if iso <= valid_isos[0]:
-            return valid_isos[0]
-        if iso >= valid_isos[-1]:
-            return valid_isos[-1]
-        # 找最近的 ISO 值
         return min(valid_isos, key=lambda x: abs(x - iso))
 
-    def _get_iso_params(self) -> tuple:
-        """获取 ISO 对应的颗粒参数"""
-        return self.ISO_PRESETS.get(self.iso, self.ISO_PRESETS[400])
-
-    def _generate_base_grain(self, shape: tuple) -> np.ndarray:
+    def _generate_bimodal_grain(self, height: int, width: int) -> np.ndarray:
         """
-        生成基础颗粒噪声
-        使用高斯分布 + 尺寸调整实现有机感
+        生成双峰分布颗粒
+
+        70% 小颗粒 (精细纹理) + 30% 大颗粒 (粗糙纹理)
+        这模拟了真实胶片中混合尺寸的银盐晶体
         """
-        h, w = shape[:2]
+        # 小颗粒层 (70%)
+        small_scale = max(1, int(self.small_size))
+        small_h, small_w = max(1, height // small_scale), max(1, width // small_scale)
+        small_noise = self.rng.standard_normal((small_h, small_w))
 
-        # 根据颗粒尺寸缩小生成噪声，再放大
-        scale = max(1, int(self.grain_size))
-        small_h, small_w = max(1, h // scale), max(1, w // scale)
+        if small_scale > 1:
+            small_noise = np.repeat(np.repeat(small_noise, small_scale, axis=0), small_scale, axis=1)
+        small_grain = small_noise[:height, :width] * 0.7
 
-        # 生成小尺寸高斯噪声
-        noise = self.rng.standard_normal((small_h, small_w))
+        # 大颗粒层 (30%)
+        large_scale = max(1, int(self.large_size))
+        large_h, large_w = max(1, height // large_scale), max(1, width // large_scale)
+        large_noise = self.rng.standard_normal((large_h, large_w))
 
-        # 放大到原尺寸 (产生颗粒块状感)
-        if scale > 1:
-            noise = np.repeat(np.repeat(noise, scale, axis=0), scale, axis=1)
-            noise = noise[:h, :w]
+        if large_scale > 1:
+            large_noise = np.repeat(np.repeat(large_noise, large_scale, axis=0), large_scale, axis=1)
+        large_grain = large_noise[:height, :width] * 0.3
 
-        return noise
+        return small_grain + large_grain
 
-    def _generate_color_grain(self, shape: tuple) -> np.ndarray:
+    def _generate_clustered_grain(self, height: int, width: int) -> np.ndarray:
         """
-        生成彩色胶片颗粒 (染料云效果)
-        彩色颗粒具有软边缘和多色偏移
+        使用 Perlin 噪声生成聚簇颗粒
+
+        真实胶片中，银盐晶体会形成小群落而非均匀分布
         """
-        h, w = shape[:2]
+        # 基础颗粒
+        base_grain = self._generate_bimodal_grain(height, width)
 
-        # RGB 三通道独立颗粒 (模拟染料云)
-        r_grain = self._generate_base_grain((h, w)) * 0.8
-        g_grain = self._generate_base_grain((h, w)) * 0.9
-        b_grain = self._generate_base_grain((h, w)) * 0.85
+        # Perlin 聚簇调制
+        cluster_scale = 30 + self.iso / 50  # ISO 越高，聚簇越大
+        cluster_map = self.perlin.fractal_noise(
+            width, height,
+            scale=cluster_scale,
+            octaves=3,
+            persistence=0.5
+        )
 
-        # 组合成彩色颗粒
-        color_grain = np.stack([r_grain, g_grain, b_grain], axis=-1)
+        # 归一化聚簇图到 [0.5, 1.5] 范围
+        cluster_map = 0.5 + (cluster_map - cluster_map.min()) / \
+                      (cluster_map.max() - cluster_map.min() + 1e-8)
 
-        # 应用软化 (彩色胶片颗粒边缘较软)
-        return color_grain * 0.7
+        # 混合: 部分聚簇 + 部分随机
+        mixed_grain = base_grain * (
+            (1 - self.cluster_strength) +
+            self.cluster_strength * cluster_map
+        )
 
-    def _generate_bw_grain(self, shape: tuple) -> np.ndarray:
+        return mixed_grain
+
+    def _compute_luminance_response(self, image: np.ndarray) -> np.ndarray:
         """
-        生成黑白胶片颗粒 (金属银晶体)
-        黑白颗粒具有硬边缘和更高锐度
+        计算分区亮度响应
+
+        根据 Dehancer 研究:
+        - 负片: 高光区域颗粒更明显
+        - 正片: 暗部区域颗粒更明显
         """
-        h, w = shape[:2]
+        # 计算亮度
+        luminance = (
+            0.299 * image[:, :, 0] +
+            0.587 * image[:, :, 1] +
+            0.114 * image[:, :, 2]
+        ) / 255.0
 
-        # 单通道颗粒
-        grain = self._generate_base_grain((h, w))
+        # 分区响应
+        response = np.zeros_like(luminance)
 
-        # 应用 roughness 增加硬边效果
-        if self.roughness > 0.5:
-            # 轻微量化以模拟晶体硬边
-            grain = np.sign(grain) * np.power(np.abs(grain), 0.8)
+        # 暗部 (0 - 0.3)
+        shadow_mask = luminance < 0.3
+        response[shadow_mask] = self.shadow_resp * (1 - luminance[shadow_mask] / 0.3 * 0.3)
 
-        # 扩展为三通道
-        return np.stack([grain, grain, grain], axis=-1)
+        # 中间调 (0.3 - 0.7)
+        midtone_mask = (luminance >= 0.3) & (luminance < 0.7)
+        response[midtone_mask] = self.midtone_resp
 
-    def _compute_luminosity_mask(self, image: np.ndarray) -> np.ndarray:
-        """
-        计算亮度响应掩码
-        暗部颗粒更明显，亮部颗粒较轻
-        """
-        # 转换到亮度 (使用感知权重)
-        if len(image.shape) == 3:
-            luminosity = 0.299 * image[:,:,0] + 0.587 * image[:,:,1] + 0.114 * image[:,:,2]
-        else:
-            luminosity = image
+        # 高光 (0.7 - 1.0)
+        highlight_mask = luminance >= 0.7
+        response[highlight_mask] = self.highlight_resp * (1 - (luminance[highlight_mask] - 0.7) / 0.3 * 0.5)
 
-        # 归一化到 0-1
-        luminosity = luminosity / 255.0
-
-        # 反转并调整曲线 (暗部 = 高响应)
-        # 使用 S 曲线使过渡更自然
-        response = 1.0 - np.power(luminosity, 0.6)
-
-        # 确保中间调也有一定颗粒
-        response = 0.3 + 0.7 * response
+        # 平滑过渡
+        response = np.clip(response, 0.2, 1.5)
 
         return response[:, :, np.newaxis]
 
-    def apply(self, image: Image.Image, intensity_override: float = None) -> Image.Image:
+    def _generate_color_grain(self, height: int, width: int) -> np.ndarray:
+        """
+        生成带空间相关性的彩色颗粒
+
+        真实彩色胶片的染料云 (dye clouds) 特性:
+        - RGB 通道有一定空间相关性 (不是完全独立)
+        - 存在色彩偏移变化
+        """
+        # 基础亮度颗粒 (RGB 共享)
+        base_grain = self._generate_clustered_grain(height, width)
+
+        # 各通道独立颗粒 (较弱)
+        r_independent = self.rng.standard_normal((height, width)) * 0.3
+        g_independent = self.rng.standard_normal((height, width)) * 0.3
+        b_independent = self.rng.standard_normal((height, width)) * 0.3
+
+        # 空间相关性混合 (70% 共享 + 30% 独立)
+        correlation = 0.7
+        r_grain = correlation * base_grain + (1 - correlation) * r_independent
+        g_grain = correlation * base_grain + (1 - correlation) * g_independent
+        b_grain = correlation * base_grain + (1 - correlation) * b_independent
+
+        # 添加色彩偏移 (chroma variance)
+        if self.chroma_var > 0:
+            chroma_noise = self.perlin.fractal_noise(width, height, scale=80, octaves=2)
+            chroma_noise = (chroma_noise - chroma_noise.mean()) * self.chroma_var
+
+            r_grain += chroma_noise * 0.8
+            g_grain -= chroma_noise * 0.3
+            b_grain += chroma_noise * 0.5
+
+        return np.stack([r_grain, g_grain, b_grain], axis=-1)
+
+    def _generate_bw_grain(self, height: int, width: int) -> np.ndarray:
+        """
+        生成黑白胶片颗粒
+
+        黑白胶片特性:
+        - 金属银晶体,边缘更锐利
+        - 单通道颗粒
+        - 更高的微对比度
+        """
+        grain = self._generate_clustered_grain(height, width)
+
+        # 增加锐度 (模拟金属晶体硬边)
+        grain = np.sign(grain) * np.power(np.abs(grain), 0.85)
+
+        # 扩展到三通道
+        return np.stack([grain, grain, grain], axis=-1)
+
+    def _apply_softening(self, grain: np.ndarray, image: Image.Image) -> np.ndarray:
+        """
+        对彩色颗粒应用轻微模糊
+
+        彩色胶片的染料云边缘较软,不像黑白那样锐利
+        """
+        if self.film_type in ["bw"]:
+            return grain  # 黑白不模糊
+
+        # 轻微高斯模糊
+        grain_image = Image.fromarray(
+            ((grain + 2) / 4 * 255).clip(0, 255).astype(np.uint8)
+        )
+        grain_image = grain_image.filter(ImageFilter.GaussianBlur(radius=0.5))
+        grain = (np.array(grain_image).astype(np.float32) / 255 * 4 - 2)
+
+        return grain
+
+    def apply(
+        self,
+        image: Image.Image,
+        intensity_override: float = None
+    ) -> Image.Image:
         """
         对图像应用胶片颗粒效果
 
@@ -158,32 +348,33 @@ class FilmGrain:
         if len(img_array.shape) == 2:
             img_array = np.stack([img_array] * 3, axis=-1)
 
-        # 移除 alpha 通道 (如果存在)
+        # 处理 alpha 通道
         has_alpha = img_array.shape[-1] == 4
         if has_alpha:
             alpha = img_array[:, :, 3:4]
             img_array = img_array[:, :, :3]
 
-        # 生成颗粒
-        if self.color_mode == "bw":
-            grain = self._generate_bw_grain(img_array.shape)
-        else:
-            grain = self._generate_color_grain(img_array.shape)
+        height, width = img_array.shape[:2]
 
-        # 计算亮度响应掩码
-        lum_mask = self._compute_luminosity_mask(img_array)
+        # 生成颗粒
+        if self.film_type == "bw":
+            grain = self._generate_bw_grain(height, width)
+        else:
+            grain = self._generate_color_grain(height, width)
+            grain = self._apply_softening(grain, image)
+
+        # 计算亮度响应
+        lum_response = self._compute_luminance_response(img_array)
 
         # 应用强度
         intensity = intensity_override if intensity_override is not None else self.intensity
-        grain = grain * intensity * 255.0 * lum_mask
+        grain = grain * intensity * 255.0 * lum_response
 
-        # 混合颗粒
+        # 混合
         result = img_array + grain
-
-        # 裁剪到有效范围
         result = np.clip(result, 0, 255).astype(np.uint8)
 
-        # 恢复 alpha 通道
+        # 恢复 alpha
         if has_alpha:
             result = np.concatenate([result, alpha.astype(np.uint8)], axis=-1)
 
@@ -194,111 +385,85 @@ def process_image(
     input_path: str,
     output_path: str = None,
     iso: int = 400,
-    color_mode: str = "color",
+    film_type: str = "color",
     intensity: float = None,
     seed: int = None
 ) -> str:
-    """
-    处理单张图像
-
-    Args:
-        input_path: 输入图像路径
-        output_path: 输出路径 (默认为 input_grain.ext)
-        iso: ISO 感光度
-        color_mode: "color" 或 "bw"
-        intensity: 自定义强度 (可选)
-        seed: 随机种子 (可选)
-
-    Returns:
-        输出文件路径
-    """
-    # 加载图像
+    """处理单张图像"""
     image = Image.open(input_path)
-
-    # 创建颗粒生成器
-    grain = FilmGrain(iso=iso, color_mode=color_mode, seed=seed)
-
-    # 应用效果
+    grain = FilmGrain(iso=iso, film_type=film_type, seed=seed)
     result = grain.apply(image, intensity_override=intensity)
 
-    # 确定输出路径
     if output_path is None:
         path = Path(input_path)
         output_path = str(path.parent / f"{path.stem}_grain{path.suffix}")
 
-    # 保存结果
     result.save(output_path, quality=95)
-
     return output_path
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="为图像添加胶片风格颗粒效果",
+        description="为图像添加真实胶片颗粒效果 v2.0",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s photo.jpg                    # 使用默认参数 (ISO 400, 彩色)
-  %(prog)s photo.jpg -o output.jpg      # 指定输出路径
-  %(prog)s photo.jpg --iso 1600         # 高感光度 (粗颗粒)
-  %(prog)s photo.jpg --iso 100          # 低感光度 (细颗粒)
-  %(prog)s photo.jpg --bw               # 黑白胶片颗粒
-  %(prog)s photo.jpg --intensity 0.15   # 自定义强度
+  %(prog)s photo.jpg                      # 默认 (ISO 400, 彩色负片)
+  %(prog)s photo.jpg --iso 1600           # 高感光度粗颗粒
+  %(prog)s photo.jpg --type bw            # 黑白胶片
+  %(prog)s photo.jpg --type positive      # 正片 (暗部颗粒更多)
+  %(prog)s photo.jpg --intensity 0.08     # 自定义强度
+
+胶片类型:
+  color     彩色负片 (默认, 如 Kodak Portra)
+  bw        黑白负片 (如 Kodak Tri-X)
+  negative  通用负片
+  positive  正片/幻灯片 (如 Kodak Ektachrome)
         """
     )
 
     parser.add_argument("input", help="输入图像路径")
     parser.add_argument("-o", "--output", help="输出图像路径")
     parser.add_argument(
-        "--iso",
-        type=int,
-        default=400,
+        "--iso", type=int, default=400,
         choices=[50, 100, 200, 400, 800, 1600, 3200],
         help="ISO 感光度 (默认: 400)"
     )
     parser.add_argument(
-        "--bw",
-        action="store_true",
-        help="使用黑白胶片颗粒 (默认: 彩色)"
+        "--type", dest="film_type", default="color",
+        choices=["color", "bw", "negative", "positive"],
+        help="胶片类型 (默认: color)"
     )
     parser.add_argument(
-        "--intensity",
-        type=float,
-        help="颗粒强度 0.0-1.0 (覆盖 ISO 预设)"
+        "--intensity", type=float,
+        help="颗粒强度 0.0-0.3 (覆盖 ISO 预设)"
     )
     parser.add_argument(
-        "--seed",
-        type=int,
+        "--seed", type=int,
         help="随机种子 (用于可重复结果)"
     )
 
     args = parser.parse_args()
 
-    # 检查输入文件
     if not Path(args.input).exists():
         print(f"错误: 找不到文件 '{args.input}'")
         return 1
-
-    # 处理图像
-    color_mode = "bw" if args.bw else "color"
 
     try:
         output_path = process_image(
             input_path=args.input,
             output_path=args.output,
             iso=args.iso,
-            color_mode=color_mode,
+            film_type=args.film_type,
             intensity=args.intensity,
             seed=args.seed
         )
-        print(f"已保存: {output_path}")
-        print(f"  ISO: {args.iso}")
-        print(f"  模式: {'黑白' if args.bw else '彩色'}胶片")
-        if args.intensity:
-            print(f"  强度: {args.intensity}")
+        print(f"✅ 已保存: {output_path}")
+        print(f"   ISO: {args.iso}")
+        print(f"   类型: {args.film_type}")
         return 0
     except Exception as e:
-        print(f"处理失败: {e}")
+        print(f"❌ 处理失败: {e}")
         return 1
 
 

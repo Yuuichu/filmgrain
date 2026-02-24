@@ -77,8 +77,8 @@
 </head>
 <body>
     <div class="container">
-        <h1>🎞️ Film Grain API</h1>
-        <p class="subtitle">为图像添加胶片风格颗粒效果</p>
+        <h1>🎞️ Film Grain API <span style="font-size:0.5em;color:#888">v2.0</span></h1>
+        <p class="subtitle">真实胶片颗粒模拟 - 双峰分布 / Perlin 聚簇 / 分区响应</p>
 
         <div class="card">
             <h2>API 端点</h2>
@@ -96,15 +96,23 @@
                 <div style="color:#aaa; font-size:0.9em">ISO 感光度: 50, 100, 200, 400, 800, 1600, 3200</div>
             </div>
             <div class="param">
-                <span class="param-name">mode</span>
+                <span class="param-name">type</span>
                 <span class="param-type">string, optional</span>
-                <div style="color:#aaa; font-size:0.9em">"color" (彩色) 或 "bw" (黑白)</div>
+                <div style="color:#aaa; font-size:0.9em">"color" (彩色负片) / "bw" (黑白) / "negative" / "positive" (正片)</div>
             </div>
             <div class="param">
                 <span class="param-name">intensity</span>
                 <span class="param-type">number, optional</span>
-                <div style="color:#aaa; font-size:0.9em">手动强度 0.01-0.5，覆盖 ISO 预设</div>
+                <div style="color:#aaa; font-size:0.9em">手动强度 0.01-0.3，覆盖 ISO 预设</div>
             </div>
+
+            <h3 style="margin: 20px 0 10px; font-size: 1em;">v2.0 新特性</h3>
+            <ul style="color:#aaa; font-size:0.9em; padding-left:20px; line-height:1.8">
+                <li>🔬 双峰尺寸分布 (70% 小颗粒 + 30% 大颗粒)</li>
+                <li>🌀 Perlin 噪声聚簇 (有机随机分布)</li>
+                <li>🌗 分区亮度响应 (暗部/中间调/高光)</li>
+                <li>🎨 RGB 通道空间相关性 (染料云模拟)</li>
+            </ul>
         </div>
 
         <div class="card">
@@ -120,9 +128,11 @@
                     <option value="800">ISO 800 (明显)</option>
                     <option value="1600">ISO 1600 (粗颗粒)</option>
                 </select>
-                <select id="modeSelect">
-                    <option value="color">🎨 彩色</option>
+                <select id="typeSelect">
+                    <option value="color">🎨 彩色负片</option>
                     <option value="bw">⬛ 黑白</option>
+                    <option value="negative">📷 通用负片</option>
+                    <option value="positive">🎞️ 正片</option>
                 </select>
                 <button id="processBtn" disabled>处理</button>
             </div>
@@ -175,7 +185,7 @@
                     body: JSON.stringify({
                         image: imageBase64,
                         iso: parseInt(document.getElementById('isoSelect').value),
-                        mode: document.getElementById('modeSelect').value
+                        type: document.getElementById('typeSelect').value
                     })
                 });
 

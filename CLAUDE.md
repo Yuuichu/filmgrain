@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-胶片颗粒效果生成器 - 基于真实胶片特性的图像处理工具。
+**Film Grain Generator v2.0** - 真实胶片颗粒模拟工具
+
+基于 [Dehancer](https://www.dehancer.com/learn/article/grain) 算法研究和 [City Frame Photography](https://cityframe-photography.com/blog/building-an-authentic-film-grain-simulator.html) 技术文档实现。
 
 ## 常用命令
 
@@ -15,81 +17,78 @@ pip install -r requirements.txt
 # 启动 GUI
 python filmgrain_gui.py
 
-# 命令行基础使用
-python filmgrain.py input.jpg
-
-# 指定 ISO 感光度
-python filmgrain.py input.jpg --iso 1600
-
-# 黑白胶片模式
-python filmgrain.py input.jpg --bw
-
-# 自定义输出路径和强度
-python filmgrain.py input.jpg -o output.jpg --intensity 0.1
+# 命令行使用
+python filmgrain.py input.jpg                    # 默认 ISO 400 彩色
+python filmgrain.py input.jpg --iso 1600         # 高感光度
+python filmgrain.py input.jpg --type bw          # 黑白胶片
+python filmgrain.py input.jpg --type positive    # 正片模式
 ```
 
-## GUI 快捷键
+## v2.0 核心算法
 
-| 快捷键 | 功能 |
-|--------|------|
-| `Ctrl+O` | 打开图像 |
-| `Ctrl+S` | 保存结果 |
-| `空格` | 按住查看原图对比 |
+### 1. 双峰尺寸分布
+```python
+# 70% 小颗粒 + 30% 大颗粒 (模拟真实银盐晶体混合)
+grain = small_grain * 0.7 + large_grain * 0.3
+```
 
-## 核心算法
+### 2. Perlin 噪声聚簇
+```python
+# 颗粒形成群落，非均匀分布
+cluster_map = perlin.fractal_noise(scale=30+iso/50, octaves=3)
+grain *= (1 - cluster_strength) + cluster_strength * cluster_map
+```
 
-### 胶片颗粒模拟原理
+### 3. 分区亮度响应
+| 区域 | 负片 | 正片 |
+|------|------|------|
+| 暗部 (0-0.3) | 0.8x | 1.2x |
+| 中间调 (0.3-0.7) | 1.0x | 1.0x |
+| 高光 (0.7-1.0) | 1.2x | 0.6x |
 
-1. **高斯噪声基底**: 使用正态分布生成基础颗粒
-2. **尺寸缩放**: 根据 ISO 调整颗粒粒径 (低 ISO = 细颗粒)
-3. **亮度响应**: 暗部颗粒更明显，使用 `1 - luminosity^0.6` 曲线
-4. **色彩差异**:
-   - 彩色: RGB 三通道独立噪声 (模拟染料云)
-   - 黑白: 单通道噪声 + 硬边处理 (模拟银盐晶体)
+### 4. RGB 空间相关性
+```python
+# 彩色胶片染料云: 70% 共享 + 30% 独立
+correlation = 0.7
+r_grain = correlation * base + (1-correlation) * r_independent
+```
 
-### ISO 预设参数
+## ISO 预设参数
 
-| ISO  | 强度   | 颗粒尺寸 | 粗糙度 |
-|------|--------|----------|--------|
-| 50   | 0.02   | 1.0x     | 0.3    |
-| 400  | 0.06   | 1.6x     | 0.6    |
-| 3200 | 0.18   | 3.0x     | 0.9    |
+| ISO | 强度 | 小颗粒 | 大颗粒 | 聚簇 |
+|-----|------|--------|--------|------|
+| 50 | 0.015 | 0.8x | 1.5x | 0.2 |
+| 400 | 0.050 | 1.5x | 3.0x | 0.4 |
+| 3200 | 0.140 | 3.0x | 6.0x | 0.7 |
 
-## 部署到 Vercel (iOS 快捷指令)
+## 胶片类型
+
+| 类型 | 说明 | 暗部响应 | 高光响应 |
+|------|------|----------|----------|
+| `color` | 彩色负片 (Kodak Portra) | 1.0 | 0.8 |
+| `bw` | 黑白负片 (Tri-X) | 1.1 | 0.7 |
+| `negative` | 通用负片 | 0.8 | 1.2 |
+| `positive` | 正片/幻灯片 | 1.2 | 0.6 |
+
+## 部署
 
 ```bash
-# 推送到 GitHub
-git init
-git add .
-git commit -m "Initial commit"
-git remote add origin https://github.com/用户名/filmgrain.git
-git push -u origin main
-
-# 然后在 vercel.com 导入该仓库
+# 推送到 GitHub 后 Vercel 自动部署
+git add -A && git commit -m "message" && git push
 ```
 
-部署后访问 `https://your-app.vercel.app` 查看在线测试页面。
-
-API 端点: `POST /api/grain`
+API: `https://filmgrain.vercel.app/api/grain`
 
 ## 项目结构
 
 ```
 filmgrain/
-├── filmgrain.py        # 核心算法 + CLI
-├── filmgrain_gui.py    # 桌面 GUI (tkinter)
+├── filmgrain.py        # 核心算法 v2.0 + CLI
+├── filmgrain_gui.py    # 桌面 GUI
 ├── api/
-│   ├── grain.py        # Vercel serverless API
+│   ├── grain.py        # Vercel API v2.0
 │   └── index.html      # 在线测试页面
 ├── ios-shortcut/
-│   └── README.md       # iOS 快捷指令配置指南
-├── vercel.json         # Vercel 部署配置
-└── requirements.txt
+│   └── README.md       # iOS 快捷指令指南
+└── vercel.json
 ```
-
-## 扩展方向
-
-- 添加 Perlin/Simplex 噪声选项
-- 胶片品牌预设 (Kodak/Fuji 色调)
-- 视频帧序列处理 (帧间颗粒变化)
-- GPU 加速 (CUDA/OpenCL)
