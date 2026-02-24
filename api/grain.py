@@ -153,8 +153,10 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
+            error_msg = str(e) if str(e) else type(e).__name__
+            self.wfile.write(json.dumps({"success": False, "error": error_msg}).encode())
 
     def do_OPTIONS(self):
         """CORS preflight"""

@@ -133,7 +133,7 @@
         <div class="card">
             <h2>iOS 快捷指令</h2>
             <p style="color:#aaa; line-height:1.6">
-                查看 <a href="https://github.com/你的用户名/filmgrain/blob/main/ios-shortcut/README.md"
+                查看 <a href="https://github.com/Yuuichu/filmgrain/blob/main/ios-shortcut/README.md"
                 style="color:#7dd3fc">配置指南</a> 创建快捷指令，实现从相册选图 → 添加胶片颗粒 → 保存。
             </p>
         </div>
@@ -166,6 +166,7 @@
 
             processBtn.disabled = true;
             status.textContent = '处理中...';
+            status.style.color = '#888';
 
             try {
                 const res = await fetch('/api/grain', {
@@ -178,15 +179,32 @@
                     })
                 });
 
+                // 检查响应状态
+                if (!res.ok) {
+                    const text = await res.text();
+                    let errorMsg = `HTTP ${res.status}`;
+                    try {
+                        const errData = JSON.parse(text);
+                        errorMsg = errData.error || errorMsg;
+                    } catch {
+                        errorMsg = text.substring(0, 100) || errorMsg;
+                    }
+                    throw new Error(errorMsg);
+                }
+
                 const data = await res.json();
                 if (data.success) {
                     preview.src = 'data:image/jpeg;base64,' + data.image;
                     status.textContent = '✅ 处理完成 (右键保存图片)';
+                    status.style.color = '#10b981';
                 } else {
-                    status.textContent = '❌ 错误: ' + data.error;
+                    throw new Error(data.error || '未知错误');
                 }
             } catch (err) {
-                status.textContent = '❌ 请求失败: ' + err.message;
+                const errMsg = err.message || String(err);
+                status.textContent = '❌ 错误: ' + errMsg;
+                status.style.color = '#ef4444';
+                console.error('处理失败:', err);
             }
 
             processBtn.disabled = false;
